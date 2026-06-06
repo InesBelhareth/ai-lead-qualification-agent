@@ -1,0 +1,277 @@
+{
+  "name": "AI Lead Qualification Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "qualify-lead",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "1a2b3c4d-0001",
+      "name": "Webhook - Receive Lead",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\n\nconst name = body.name || 'Unknown';\nconst email = body.email || '';\nconst company = body.company || '';\nconst message = body.message || '';\nconst budget = body.budget || 'not specified';\n\nreturn [{\n  json: {\n    name,\n    email,\n    company,\n    message,\n    budget,\n    received_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "1a2b3c4d-0002",
+      "name": "Extract & Normalize Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://google.serper.dev/search",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-KEY",
+              "value": "={{ $env.SERPER_API_KEY || 'YOUR_SERPER_API_KEY' }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"q\": \"{{ $('Extract & Normalize Data').first().json.company }} LinkedIn\"\n}"
+      },
+      "id": "1a2b3c4d-0007",
+      "name": "Serper - Search Company",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "model": "gpt-4o-mini",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a lead qualification assistant. Analyze the lead data and return ONLY a valid JSON object with these fields:\n- score: integer from 0 to 100\n- category: one of 'hot', 'warm', 'cold'\n- summary: 2-sentence qualification summary\n- recommended_action: next step to take with this lead\n- reasoning: brief explanation of the score\n\nReturn ONLY the JSON object, no markdown, no extra text."
+            },
+            {
+              "role": "user",
+              "content": "=Qualify this lead:\n\nName: {{ $('Extract & Normalize Data').first().json.name }}\nEmail: {{ $('Extract & Normalize Data').first().json.email }}\nCompany: {{ $('Extract & Normalize Data').first().json.company }}\nMessage: {{ $('Extract & Normalize Data').first().json.message }}\nBudget: {{ $('Extract & Normalize Data').first().json.budget }}\n\nCompany Search Results (from LinkedIn/Google via Serper.dev):\n{{ JSON.stringify($json) }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.3
+        }
+      },
+      "id": "1a2b3c4d-0003",
+      "name": "OpenAI - Qualify Lead",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const aiResponse = $input.first().json.message?.content || $input.first().json.text || '';\nconst leadData = $('Extract & Normalize Data').first().json;\n\nlet qualification;\ntry {\n  qualification = JSON.parse(aiResponse);\n} catch(e) {\n  qualification = {\n    score: 50,\n    category: 'warm',\n    summary: 'Could not parse AI response.',\n    recommended_action: 'Manual review required.',\n    reasoning: 'Parse error.'\n  };\n}\n\nreturn [{\n  json: {\n    ...leadData,\n    ...qualification,\n    qualified_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "1a2b3c4d-0004",
+      "name": "Parse AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1080, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "leads",
+        "columns": "name, email, company, message, budget, score, category, summary, recommended_action, reasoning, received_at, qualified_at",
+        "additionalFields": {}
+      },
+      "id": "1a2b3c4d-0005",
+      "name": "Supabase - Save Lead",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1300, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, lead_id: $json.id, score: $('Parse AI Response').first().json.score, category: $('Parse AI Response').first().json.category, message: 'Lead qualified and saved successfully.' }) }}"
+      },
+      "id": "1a2b3c4d-0006",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1520, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.score }}",
+              "operation": "larger",
+              "value2": 70
+            }
+          ]
+        }
+      },
+      "id": "1a2b3c4d-0008",
+      "name": "If Hot Lead",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1520, 400]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_CHANNEL_ID || 'general' }}",
+          "mode": "list",
+          "cachedResultName": "general"
+        },
+        "text": "=🚨 *Hot Lead Alert!*\n👤 *Name:* {{ $('If Hot Lead').first().json.name }}\n📧 *Email:* {{ $('If Hot Lead').first().json.email }}\n🏢 *Company:* {{ $('If Hot Lead').first().json.company }}\n📈 *Score:* {{ $('If Hot Lead').first().json.score }}/100\n📝 *Summary:* {{ $('If Hot Lead').first().json.summary }}\n⚡ *Action:* {{ $('If Hot Lead').first().json.recommended_action }}",
+        "otherOptions": {}
+      },
+      "id": "1a2b3c4d-0009",
+      "name": "Slack - Notify Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1740, 350]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.HUBSPOT_ACCESS_TOKEN || 'YOUR_HUBSPOT_ACCESS_TOKEN' }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"properties\": {\n    \"email\": \"{{ $('If Hot Lead').first().json.email }}\",\n    \"firstname\": \"{{ $('If Hot Lead').first().json.name.split(' ')[0] || $('If Hot Lead').first().json.name }}\",\n    \"lastname\": \"{{ $('If Hot Lead').first().json.name.split(' ').slice(1).join(' ') || '' }}\",\n    \"company\": \"{{ $('If Hot Lead').first().json.company }}\",\n    \"message\": \"{{ $('If Hot Lead').first().json.message }}\"\n  }\n}"
+      },
+      "id": "1a2b3c4d-0010",
+      "name": "HubSpot - Create Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1960, 350]
+    }
+  ],
+  "connections": {
+    "Webhook - Receive Lead": {
+      "main": [
+        [
+          {
+            "node": "Extract & Normalize Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract & Normalize Data": {
+      "main": [
+        [
+          {
+            "node": "Serper - Search Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Serper - Search Company": {
+      "main": [
+        [
+          {
+            "node": "OpenAI - Qualify Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI - Qualify Lead": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Response": {
+      "main": [
+        [
+          {
+            "node": "Supabase - Save Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Save Lead": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "If Hot Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Hot Lead": {
+      "main": [
+        [
+          {
+            "node": "Slack - Notify Team",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack - Notify Team": {
+      "main": [
+        [
+          {
+            "node": "HubSpot - Create Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
